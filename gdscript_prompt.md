@@ -1125,3 +1125,141 @@ var text = "Values: {0}, {1}".format([42, "test"])
 Godot uses reference counting, not garbage collection. Classes extending `RefCounted` (and `Resource`) are freed automatically when no references remain. Classes extending `Node` or `Object` must be freed manually with `free()` or `queue_free()`. Deleting a node with `free()`/`queue_free()` also deletes all its children recursively.
 
 Use `weakref()` to avoid reference cycles with RefCounted objects. Use `is_instance_valid(instance)` to check if an Object has been freed.
+
+---
+
+## Custom Drawing (`_draw`)
+
+Any node inheriting from `CanvasItem` (which includes `Node2D` and `Control`) can override `_draw()` to render custom shapes. Drawing is primarily used for **debugging and visualization** — showing collision areas, velocity arrows, detection ranges, paths, AI states, etc.
+
+### How It Works
+
+Override `_draw()` in your script. It is called once and cached. To trigger a redraw, call `queue_redraw()`. Drawing uses the node's local coordinate system.
+
+```gdscript
+extends Node2D
+
+func _draw() -> void:
+    draw_circle(Vector2.ZERO, 50.0, Color.RED)
+
+# Call queue_redraw() whenever something changes that affects drawing.
+# To draw every frame (e.g. for continuously changing debug info):
+func _process(_delta: float) -> void:
+    queue_redraw()
+```
+
+### Available Draw Methods
+
+```gdscript
+# Lines
+draw_line(from: Vector2, to: Vector2, color: Color, width: float = -1.0, antialiased: bool = false)
+draw_dashed_line(from: Vector2, to: Vector2, color: Color, width: float = -1.0, dash: float = 2.0, aligned: bool = true, antialiased: bool = false)
+draw_polyline(points: PackedVector2Array, color: Color, width: float = -1.0, antialiased: bool = false)
+draw_multiline(points: PackedVector2Array, color: Color, width: float = -1.0, antialiased: bool = false)
+
+# Shapes
+draw_circle(position: Vector2, radius: float, color: Color, filled: bool = true, width: float = -1.0, antialiased: bool = false)
+draw_arc(center: Vector2, radius: float, start_angle: float, end_angle: float, point_count: int, color: Color, width: float = -1.0, antialiased: bool = false)
+draw_rect(rect: Rect2, color: Color, filled: bool = true, width: float = -1.0, antialiased: bool = false)
+draw_polygon(points: PackedVector2Array, colors: PackedColorArray)
+draw_colored_polygon(points: PackedVector2Array, color: Color)
+
+# Text and textures
+draw_string(font: Font, pos: Vector2, text: String, alignment: int = HORIZONTAL_ALIGNMENT_LEFT, width: float = -1, font_size: int = 16, modulate: Color = Color.WHITE)
+draw_texture(texture: Texture2D, position: Vector2, modulate: Color = Color.WHITE)
+
+# Transform (affects subsequent draw calls within the same _draw)
+draw_set_transform(position: Vector2, rotation: float = 0.0, scale: Vector2 = Vector2.ONE)
+```
+
+### Debug Drawing Pattern
+
+Debug draws should always be togglable via an `@export` variable. This is the standard pattern:
+
+```gdscript
+extends CharacterBody2D
+
+@export var debug_draw: bool = false
+
+var _velocity: Vector2 = Vector2.ZERO
+var _detection_radius: float = 200.0
+var _target_position: Vector2 = Vector2.ZERO
+
+func _process(delta: float) -> void:
+    # ... game logic ...
+    if debug_draw:
+        queue_redraw()
+
+func _draw() -> void:
+    if not debug_draw:
+        return
+
+    # Draw velocity arrow
+    _draw_arrow(Vector2.ZERO, _velocity.normalized() * 60.0, Color.GREEN)
+
+    # Draw detection radius
+    draw_arc(Vector2.ZERO, _detection_radius, 0, TAU, 64, Color("#80ffff00"), 1.0)
+
+    # Draw target direction
+    if _target_position != Vector2.ZERO:
+        var local_target = to_local(_target_position)
+        _draw_arrow(Vector2.ZERO, local_target.normalized() * 80.0, Color.RED)
+
+    # Draw a region/area
+    var region = Rect2(-50, -50, 100, 100)
+    draw_rect(region, Color("#3300ff00"), true)   # Filled, semi-transparent
+    draw_rect(region, Color.GREEN, false, 2.0)     # Outline
+
+
+## Draws an arrow from `from` to `to` with an arrowhead.
+func _draw_arrow(from: Vector2, to: Vector2, color: Color, width: float = 2.0) -> void:
+    var direction = (to - from).normalized()
+    var arrow_size = 10.0
+    var perpendicular = Vector2(-direction.y, direction.x)
+
+    draw_line(from, to, color, width)
+    draw_line(to, to - direction * arrow_size + perpendicular * arrow_size * 0.5, color, width)
+    draw_line(to, to - direction * arrow_size - perpendicular * arrow_size * 0.5, color, width)
+```
+
+### Common Debug Draw Helpers
+
+When writing debug drawing code, implement reusable helper methods for common shapes:
+
+- **Arrow** (direction/velocity): line with an arrowhead, as shown above.
+- **Circle** (radius/range): `draw_arc(center, radius, 0, TAU, 64, color, width)` for an unfilled circle, or `draw_circle()` for filled.
+- **Region/Area** (rectangular zones): `draw_rect()` with a semi-transparent fill and a solid outline.
+- **Cross/Point** (marking positions): two short perpendicular lines at the target point.
+- **Path** (waypoints): `draw_polyline()` connecting an array of points.
+- **Label** (state/values): `draw_string()` with the default font from `ThemeDB.fallback_font`.
+
+```gdscript
+## Draws a cross marker at a position.
+func _draw_cross(pos: Vector2, size: float, color: Color, width: float = 1.0) -> void:
+    draw_line(pos - Vector2(size, 0), pos + Vector2(size, 0), color, width)
+    draw_line(pos - Vector2(0, size), pos + Vector2(0, size), color, width)
+
+## Draws a text label at a position.
+func _draw_label(pos: Vector2, text: String, color: Color = Color.WHITE) -> void:
+    var font = ThemeDB.fallback_font
+    draw_string(font, pos, text, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, color)
+```
+
+### Drawing in the Editor
+
+To show debug draws in the editor (for level design visualization), combine `@tool` with drawing:
+
+```gdscript
+@tool
+extends Node2D
+
+@export var radius: float = 100.0:
+    set(value):
+        radius = value
+        queue_redraw()
+
+func _draw() -> void:
+    draw_arc(Vector2.ZERO, radius, 0, TAU, 64, Color("#80ff0000"), 2.0)
+```
+
+This is useful for visualizing detection ranges, spawn areas, trigger zones, and other spatial properties directly in the editor viewport.
