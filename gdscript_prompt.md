@@ -1263,3 +1263,110 @@ func _draw() -> void:
 ```
 
 This is useful for visualizing detection ranges, spawn areas, trigger zones, and other spatial properties directly in the editor viewport.
+
+## Editor Plugins (`EditorPlugin`)
+
+A `@tool` script lets a node *run* its own code in the editor (e.g. drawing itself via `_draw()`), but it only sees its own instance. An **editor plugin** (`extends EditorPlugin`) is more expressive: it operates on the editor itself, so it can inspect and mutate *other* nodes in the edited scene, capture raw viewport input, drive the undo/redo history, and draw overlays on top of the 2D/3D viewport. Use a plugin when you need the editor to *interact with* scene objects (select, move, connect, generate them) rather than have a single node merely draw a visualization of itself.
+
+A plugin lives under `res://addons/<plugin_name>/` and needs two files: a `plugin.cfg` descriptor and a `@tool extends EditorPlugin` script referenced by it. Enable it in **Project Settings → Plugins**.
+
+```
+# addons/my_plugin/plugin.cfg
+[plugin]
+name="My Plugin"
+description="What it does."
+author=""
+version="1.0"
+script="plugin.gd"
+```
+
+### Typical Workflow
+
+A plugin that manipulates 2D viewport objects generally implements these `EditorPlugin` overrides:
+
+- **`_handles(object: Object) -> bool`** — called with the currently selected object. Return `true` to make the editor route viewport input to your plugin. This is where you gate *when* the plugin is active. You don't have to inspect `object`: you can check the edited scene as a whole (e.g. "does this scene contain any node I care about?") so the plugin isn't tied to what is currently selected.
+- **`_edit(object: Object) -> void`** — called when the editor hands your plugin an object to edit (the current selection). Implement this when your tool operates *on the selected node*. **Omit it** when you want to act on objects regardless of selection — leaving it out is what frees the plugin from the current-selection constraint.
+- **`_forward_canvas_gui_input(event: InputEvent) -> bool`** — receives mouse/keyboard events in the 2D viewport while `_handles()` is true. Return `true` to **consume** the event (preventing the editor's own box-select, node-drag, and pan) and `false` to let it pass through. This is the core of click/drag interaction. (`_forward_3d_gui_input` is the 3D equivalent.)
+- **`_forward_canvas_draw_over_viewport(overlay: Control) -> void`** — draw overlays (handles, outlines, guides) on top of the viewport. Call `update_overlays()` to request a redraw.
+
+Mutate scene nodes through `get_undo_redo()` rather than assigning properties directly. This makes edits undoable and marks the scene dirty so Godot prompts to save. Merge continuous edits (like a drag) into one history entry with `UndoRedo.MERGE_ENDS`.
+
+```gdscript
+var undo_redo := get_undo_redo()
+undo_redo.create_action("Move Node", UndoRedo.MERGE_ENDS)
+undo_redo.add_do_property(node, "position", new_pos)
+undo_redo.add_undo_property(node, "position", node.position)
+undo_redo.commit_action()
+```
+
+Access the edited scene with `EditorInterface.get_edited_scene_root()` and the selection with `EditorInterface.get_selection()`.
+
+### Example: Drag Multiple Nodes in the Viewport
+
+This plugin lets the user click-drag any `AnchorPoint` (a custom `Node2D`) in the 2D viewport. It deliberately does **not** implement `_edit()`, so dragging works on any anchor regardless of the current selection. The activation condition lives in `_handles()`, which scans the edited scene for `AnchorPoint` children instead of inspecting the selected object.
+
+```gdscript
+@tool
+extends EditorPlugin
+
+var _dragged: AnchorPoint = null
+var _grab_offset: Vector2 = Vector2.ZERO  # origin-to-cursor, local space
+
+## Active whenever the edited scene contains at least one AnchorPoint —
+## not tied to the current selection. (No _edit() is implemented.)
+func _handles(object: Object) -> bool:
+	return _find_anchors().size() > 0
+
+func _forward_canvas_gui_input(event: InputEvent) -> bool:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		if event.pressed:
+			return _try_begin_drag()
+		_dragged = null
+		return false
+
+	if event is InputEventMouseMotion and _dragged != null:
+		_update_drag()
+		return true  # consume so the editor doesn't box-select/pan
+	return false
+
+func _try_begin_drag() -> bool:
+	var anchors := _find_anchors()
+	# Reverse order so anchors drawn on top win the hit test.
+	for i in range(anchors.size() - 1, -1, -1):
+		var anchor := anchors[i]
+		var local_mouse := anchor.get_local_mouse_position()
+		if anchor.is_point_inside(local_mouse):
+			_dragged = anchor
+			_grab_offset = local_mouse
+			return true  # consume so the editor doesn't start its own selection
+	return false
+
+func _update_drag() -> void:
+	var parent := _dragged.get_parent() as Node2D
+	var mouse_in_parent := parent.get_local_mouse_position() if parent != null \
+		else _dragged.get_global_mouse_position()
+	var offset := _grab_offset.rotated(_dragged.rotation) * _dragged.scale
+	var new_pos := mouse_in_parent - offset
+
+	var ur := get_undo_redo()
+	ur.create_action("Move AnchorPoint", UndoRedo.MERGE_ENDS)
+	ur.add_do_property(_dragged, "position", new_pos)
+	ur.add_undo_property(_dragged, "position", _dragged.position)
+	ur.commit_action()
+
+## Recursively collect every AnchorPoint in the edited scene.
+func _find_anchors() -> Array[AnchorPoint]:
+	var result: Array[AnchorPoint] = []
+	var root := EditorInterface.get_edited_scene_root()
+	if root != null:
+		_collect(root, result)
+	return result
+
+func _collect(node: Node, into: Array[AnchorPoint]) -> void:
+	if node is AnchorPoint:
+		into.append(node)
+	for child in node.get_children():
+		_collect(child, into)
+```
+
+Key points: `_handles()` returning `true` is what activates viewport input forwarding, and putting the scene-scan condition there (rather than in `_edit()`) is what lets the plugin act on unselected nodes. `_forward_canvas_gui_input()` returns `true` only while actively dragging, so all other editor interactions remain untouched. The drag is committed through `UndoRedo` with `MERGE_ENDS` so the whole gesture is a single undoable action.
